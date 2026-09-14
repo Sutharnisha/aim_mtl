@@ -1,0 +1,18 @@
+# environments
+.venv/
+__pycache__/
+*.pyc
+.claude/
+
+# data (download via README instructions)
+data/qm9/raw/
+data/qm9/processed/
+
+# model checkpoints (too large for GitHub; keep history.json + plots)
+*.pt
+*.pth
+*.ckpt
+
+# logs
+Unimol/src/logs/
+GNN/src/logs/

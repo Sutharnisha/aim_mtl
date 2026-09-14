@@ -1,0 +1,22 @@
+# Single environment for BOTH pipelines (GNN/src and Unimol/src).
+# Tested with Python 3.14 in ./.venv (CUDA 13 build of torch).
+#
+#   python -m venv .venv && source .venv/bin/activate
+#   pip install --upgrade pip
+#   pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cu130   # pick the cuXX matching your driver, or omit --index-url for CPU
+#   pip install -r requirements.txt
+#
+# unimol-tools downloads the pretrained Uni-Mol weights (~700 MB) and its
+# atom dictionary on first use into <site-packages>/unimol_tools/weights/.
+
+torch==2.14.0
+numpy==2.2.6
+pandas==2.3.3
+scipy==1.18.1
+rdkit==2026.3.6
+matplotlib==3.11.2
+seaborn==0.13.2
+tqdm==4.70.1
+scikit-learn==1.9.1
+huggingface_hub==1.31.0
+unimol-tools==0.1.6
