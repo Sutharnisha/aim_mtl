@@ -16,3 +16,6 @@ data/qm9/processed/
 # logs
 Unimol/src/logs/
 GNN/src/logs/
+Unimol/results_*/
+GNN/result_*/
+*.pdf
