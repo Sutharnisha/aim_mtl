@@ -50,7 +50,7 @@ import rdkit
 
 
 
-from data import get_loaders, TASK_NAMES, N_TASKS, TARGET_COLS
+from data import get_loaders, TASK_NAMES, N_TASKS, TARGET_COLS, parse_task_spec
 from model import MPNNMultiTask, build_model
 from gnn_collate import batch_to_device
 from aim_optimizer import (
@@ -97,9 +97,9 @@ def _per_task_grads(
     flat_grads     = []
     task_loss_vals = []
 
-    for i in range(N_TASKS):
+    for i in range(model.n_tasks):
         loss_i = F.l1_loss(model.task_forward(h, i), targets_norm[:, i])
-        grads_i = torch.autograd.grad(loss_i, shared_params, retain_graph=(i < N_TASKS - 1))
+        grads_i = torch.autograd.grad(loss_i, shared_params, retain_graph=(i < model.n_tasks - 1))
         task_loss_vals.append(loss_i.item())
         flat_grads.append(flatten_grads(grads_i, shared_params))
 
@@ -125,7 +125,7 @@ def _fill_head_grads_and_override_encoder(
 
     optimizer.zero_grad()
     h     = model.shared_forward(batch)
-    preds = torch.stack([model.task_forward(h, i) for i in range(N_TASKS)], dim=1)
+    preds = torch.stack([model.task_forward(h, i) for i in range(model.n_tasks)], dim=1)
     loss  = F.l1_loss(preds, targets_norm)
     loss.backward()
 
@@ -156,7 +156,7 @@ def _step_stl(
     loss.backward()
     optimizer.step()
 
-    task_losses = [0.0] * N_TASKS
+    task_losses = [0.0] * model.n_tasks
     task_losses[task_idx] = loss.item()
     return {"task_losses": task_losses}
 
@@ -179,7 +179,7 @@ def _step_ls(
     optimizer.zero_grad()
     h     = model.shared_forward(batch)
     losses = [F.l1_loss(model.task_forward(h, i), targets_norm[:, i])
-        for i in range(N_TASKS)]
+        for i in range(model.n_tasks)]
     torch.stack(losses).mean().backward()
     optimizer.step()
 
@@ -267,10 +267,12 @@ def evaluate(
     means:  torch.Tensor,
     stds:   torch.Tensor,
     device: torch.device,
+    task_names: List[str] = TASK_NAMES,
 ) -> Dict[str, float]:
     """Compute MAE in physical (un-normalised) units for each task."""
     model.eval()
-    accum_abs_err = [0.0] * N_TASKS
+    n_tasks = len(task_names)
+    accum_abs_err = [0.0] * n_tasks
     n_total = 0
 
     for batch in loader:
@@ -280,15 +282,15 @@ def evaluate(
 
         h = model.shared_forward(batch)
         preds_norm = torch.stack(
-            [model.task_forward(h, i) for i in range(N_TASKS)], dim=1)
+            [model.task_forward(h, i) for i in range(n_tasks)], dim=1)
         preds = preds_norm * stds + means
 
-        for i in range(N_TASKS):
+        for i in range(n_tasks):
             accum_abs_err[i] += F.l1_loss(preds[:, i], targets[:, i], reduction="sum").item()
         n_total += B
 
     model.train()
-    mae = {TASK_NAMES[i]: accum_abs_err[i] / n_total for i in range(N_TASKS)}
+    mae = {task_names[i]: accum_abs_err[i] / n_total for i in range(n_tasks)}
 
     # Normalized (relative-to-std) MAE — used for scheduler/early-stopping/
     # checkpoint selection ONLY. With the full 11-task QM9 set, raw
@@ -299,8 +301,8 @@ def evaluate(
     # task back on a comparable ~O(1) scale, mirroring what the
     # standardized training loss already optimizes.
     mae_norm = {
-        TASK_NAMES[i]: mae[TASK_NAMES[i]] / stds[i].item()
-        for i in range(N_TASKS)
+        task_names[i]: mae[task_names[i]] / stds[i].item()
+        for i in range(n_tasks)
     }
     return mae, mae_norm
 
@@ -324,7 +326,8 @@ def train(
     lambda_m:         float = 0.01,
     lambda_p:         float = 0.08,
     k:                float = 10.0,
-    stl_task_idx:     int   = 0,
+    stl_task_idx:     int   = 0,     # global QM9 index (0..10), also with task_indices
+    task_indices:     Optional[List[int]] = None,  # QM9 cols to train on; None = all 11
     data_root:        str   = "../../data/qm9",
     save_dir:         str   = "../result_updated",
     log_every:        int   = 1,
@@ -339,15 +342,28 @@ def train(
     torch.manual_seed(seed)
     np.random.seed(seed)
 
+    # ── Task subset (default: the full 11-task set) ───────────────────────
+    task_cols  = list(TARGET_COLS) if task_indices is None else [int(i) for i in task_indices]
+    task_names = [TASK_NAMES[i] for i in task_cols]
+    n_tasks    = len(task_cols)
+    if method == "stl":
+        if stl_task_idx not in task_cols:
+            raise ValueError(f"stl_task_idx={stl_task_idx} ({TASK_NAMES[stl_task_idx]}) "
+                             f"is not among the selected tasks {task_names}")
+        stl_pos = task_cols.index(stl_task_idx)   # head/column position within the subset
+    else:
+        stl_pos = 0
+
     print(f"\n{'='*65}")
     print(f"  AIM + MPNN (Gilmer 2017) | method={method}  n_train={n_train:,}  "
           f"seed={seed}  device={device}")
+    print(f"  tasks ({n_tasks}): {task_names}")
     print(f"{'='*65}")
 
     # ── Data ──────────────────────────────────────────────────────────────
     loaders = get_loaders(
         root=data_root, n_train=n_train,
-        batch_size=batch_size, seed=seed,
+        batch_size=batch_size, seed=seed, target_cols=task_cols,
     )
     means = loaders["means"].to(device)
     stds  = loaders["stds"].to(device)
@@ -356,7 +372,7 @@ def train(
     # ── Model ─────────────────────────────────────────────────────────────
     model = build_model(
         device=device,
-        n_tasks=N_TASKS,
+        n_tasks=n_tasks,
         head_hidden=head_hidden,
         trainable_layers=trainable_layers,
     )
@@ -376,7 +392,7 @@ def train(
     policy_loss_fn   = None
 
     if method == "aim_scalar":
-        policy           = AIMScalarPolicy(n_tasks=N_TASKS, k=k).to(device)
+        policy           = AIMScalarPolicy(n_tasks=n_tasks, k=k).to(device)
         optimizer_policy = torch.optim.Adam(policy.parameters(), lr=lr_policy)
         scheduler_policy = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
             optimizer_policy,
@@ -387,7 +403,7 @@ def train(
         policy_loss_fn   = AIMPolicyLoss(lambda_g, lambda_m, lambda_p)
 
     elif method == "aim_matrix":
-        policy           = AIMMatrixPolicy(n_tasks=N_TASKS, k=k).to(device)
+        policy           = AIMMatrixPolicy(n_tasks=n_tasks, k=k).to(device)
         optimizer_policy = torch.optim.Adam(policy.parameters(), lr=lr_policy)
         scheduler_policy = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
             optimizer_policy,
@@ -427,7 +443,7 @@ def train(
                 step_info = _step_stl(
                     model, optimizer_model,
                     primary_batch, means, stds, device,
-                    stl_task_idx,
+                    stl_pos,
                 )
             elif method == "ls":
                 step_info = _step_ls(
@@ -450,8 +466,8 @@ def train(
             epoch_steps.append(step_info)
 
         # ── Validation ────────────────────────────────────────────────────
-        val_results,  val_results_norm  = evaluate(model, loaders["val_loader"],  means, stds, device)
-        test_results, test_results_norm = evaluate(model, loaders["test_loader"], means, stds, device)
+        val_results,  val_results_norm  = evaluate(model, loaders["val_loader"],  means, stds, device, task_names)
+        test_results, test_results_norm = evaluate(model, loaders["test_loader"], means, stds, device, task_names)
         # Model selection / scheduling use the normalized (unit-agnostic)
         # MAE so no single task's raw physical scale dominates — see the
         # comment in evaluate(). Reported/table metrics stay physical-unit.
@@ -549,6 +565,8 @@ if __name__ == "__main__":
                    choices=["ls", "pcgrad", "aim_scalar", "aim_matrix", "stl"])
     p.add_argument("--stl_task_idx",     type=int,   default=0,
                    help=f"Task index for STL, 0..{10} -> {TASK_NAMES}")
+    p.add_argument("--tasks",            nargs="+", default=None,
+                   help="Task names/indices to train on (default: all 11), e.g. --tasks mu eps_LUMO")
     p.add_argument("--n_train",          type=int,   default=10_000,
                    help="AIM paper QM9 subset size (10k/50k/100k) — 10k here")
     p.add_argument("--n_epochs",         type=int,   default=400,
@@ -577,4 +595,7 @@ if __name__ == "__main__":
     p.add_argument("--device",           default=None, dest="device_str")
     args = p.parse_args()
 
-    train(**vars(args))
+    kw = vars(args)
+    tasks = kw.pop("tasks")
+    kw["task_indices"] = parse_task_spec(tasks) if tasks else None
+    train(**kw)

@@ -69,6 +69,26 @@ TASK_NAMES  = ["mu", "alpha", "eps_HOMO", "eps_LUMO", "R2", "zpve",
                "U0", "U", "H", "G", "Cv"]
 TARGET_COLS = list(range(N_TASKS))
 
+
+def parse_task_spec(tasks) -> List[int]:
+    """Turn a list of task names ('mu') and/or indices ('3') into sorted
+    QM9 column indices. None / empty -> all N_TASKS tasks."""
+    if not tasks:
+        return list(TARGET_COLS)
+    idxs = []
+    for tk in tasks:
+        tk = str(tk)
+        if tk.isdigit():
+            i = int(tk)
+            if not 0 <= i < N_TASKS:
+                raise ValueError(f"task index {i} out of range 0..{N_TASKS - 1}")
+        elif tk in TASK_NAMES:
+            i = TASK_NAMES.index(tk)
+        else:
+            raise ValueError(f"unknown task {tk!r}; choose from {TASK_NAMES}")
+        idxs.append(i)
+    return sorted(set(idxs))
+
 # Per-task units AFTER the conversions below are applied (for reporting).
 TASK_UNITS = {
     "mu": "D", "alpha": "Bohr^3", "eps_HOMO": "eV", "eps_LUMO": "eV",
@@ -265,6 +285,7 @@ def get_loaders(
     batch_size:  int   = 32,
     seed:        int   = 42,
     num_workers: int   = 0,
+    target_cols: List[int] = TARGET_COLS,
 ) -> dict:
     """
     Build DataLoaders for all splits using UniMolCollator.
@@ -281,7 +302,7 @@ def get_loaders(
     dataset = load_qm9(root)
     splits  = make_splits(dataset, n_train=n_train, seed=seed)
 
-    collator = UniMolCollator(target_cols=TARGET_COLS)
+    collator = UniMolCollator(target_cols=target_cols)
 
     loader_kw = dict(
         collate_fn=collator,
@@ -295,7 +316,7 @@ def get_loaders(
     val_loader     = DataLoader(splits["val"],      shuffle=False, **loader_kw)
     test_loader    = DataLoader(splits["test"],     shuffle=False, **loader_kw)
 
-    means, stds = compute_normalization(splits["primary"])
+    means, stds = compute_normalization(splits["primary"], target_cols)
 
     return {
         "primary_loader": primary_loader,

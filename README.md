@@ -25,6 +25,7 @@ Both pipelines assume a normal single-GPU machine — there is no reduced-memory
 ├── GNN/
 │   ├── src/                 # training pipeline (see below)
 │   └── result_updated/        # trained runs: <method>_n<N>_seed<S>/{best_model.pt, history.json}
+│                              #   (--tasks subsets: tasks_<names>/<method>_n<N>_seed<S>/)
 ├── Unimol/
 │   ├── src/                 # training pipeline (see below)
 │   └── results/             # trained runs: <method>_n<N>_seed<S>/{best_model.pt, history.json}
@@ -45,7 +46,7 @@ Both pipelines assume a normal single-GPU machine — there is no reduced-memory
 | `analysis.py` | Results table + policy-matrix/loss plots for that backbone alone | No (same pattern, GNN's is the maintained one — see note below) |
 
 
-Uni-Mol's `src/` additionally has `download_data.py` (QM9 + pretrained-weight setup/smoke test), `run_experiments.py` (batch launcher for the full method × subset × seed matrix), `environment.yml`, and the cross-backbone comparison tools `comparison_table.py` / `plot_comparison.py` (these read both `Unimol/results/` and `GNN/result_updated/` to compare methods across both backbones side by side).
+Both `src/` folders have `run_10k_experiments.py` (full STL + MTL method × seed matrix, 11-task or any `--tasks` subset); `GNN/src/` also has `run_10k_stl.py` (STL baseline only). Uni-Mol's `src/` additionally has `download_data.py` (QM9 + pretrained-weight setup/smoke test), `environment.yml`, and the cross-backbone comparison tools `comparison_table.py` / `plot_comparison.py` (these read both `Unimol/results/` and `GNN/result_updated/` to compare methods across both backbones side by side).
 
 > **Note:** `Unimol/src/analysis.py` is a stale leftover from before this repo was split into `GNN/`+`Unimol/` — it's superseded by `comparison_table.py`/`plot_comparison.py`, has unused imports, and its `plot_loss_curves`  assumes the project 3-task setup. It isn't part of the intended pipeline; flagging it here rather than silently documenting it as a real feature.
 
@@ -110,19 +111,99 @@ QM9 is available from [quantum-machine.org/datasets](http://quantum-machine.org/
 > plot scripts pick the best epoch with `metrics.best_epoch_key`, so the
 > reported test MAE is always the one at `best_model.pt`.
 
-Run from `GNN/src/`:
+### Running commands
+
+All commands are run from `GNN/src/` (MPNN backbone) or `Unimol/src/`
+(Uni-Mol backbone) — the CLIs are identical. Use the project venv
+(`.venv/bin/python`), which has torch installed.
+
+**Task selection.** Every script takes `--tasks` (names or indices).
+Omit it for the paper's full 11-task setting; pass a subset for a smaller
+problem. Subset runs are stored in their own sub-folder
+(`<save_dir>/tasks_<names>/`, e.g. `tasks_mu-eps_LUMO/`) so they never
+overwrite 11-task runs, and `--resume` works independently in each.
+
+| idx | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| name | mu | alpha | eps_HOMO | eps_LUMO | R2 | zpve | U0 | U | H | G | Cv |
+
+#### 1. Full method × seed matrix — one command (recommended)
+
+`run_10k_experiments.py` runs STL (one run per task) plus every MTL method
+(`ls`, `pcgrad`, `aim_scalar`, `aim_matrix`) at n_train=10,000 and prints the
+paper-style table (Mean Rank, Δm% vs STL, per-task test MAE).
 
 ```bash
-python train.py --method aim_matrix --n_train 10000 --n_epochs 400   # AIM, matrix policy
-python train.py --method aim_scalar --n_train 10000 --n_epochs 400   # AIM, scalar policy
+# ── 11 tasks (paper setting) ──────────────────────────────────────────
+python run_10k_experiments.py                                # 1 seed (42)
+python run_10k_experiments.py --seeds 42 43 44                # 3 seeds: mean ± std + significance vs STL
+python run_10k_experiments.py --resume                        # skip runs that already have history.json
+python run_10k_experiments.py --methods aim_matrix --skip_stl # only one MTL method, no STL
+python run_10k_experiments.py --n_epochs 5 --patience 5       # smoke test
+
+# ── 2 tasks (mu + eps_LUMO) — same script, same methods ───────────────
+python run_10k_experiments.py --tasks mu eps_LUMO
+python run_10k_experiments.py --tasks mu eps_LUMO --seeds 42 43 44
+python run_10k_experiments.py --tasks mu eps_LUMO --resume
+python run_10k_experiments.py --tasks 0 3                     # indices work too
+python run_10k_experiments.py --tasks mu eps_LUMO --methods ls pcgrad   # subset of methods
+python run_10k_experiments.py --tasks mu eps_LUMO --skip_stl  # MTL only, no STL baseline
+```
+
+Results: `<save_dir>/seed_results_n10000.json` (11-task) or
+`<save_dir>/tasks_mu-eps_LUMO/seed_results_n10000.json` (2-task), with
+`save_dir = ../result_updated` (GNN) or `../results` (Uni-Mol).
+
+#### 2. STL baseline only
+
+```bash
+python run_10k_stl.py                        # GNN only: all 11 STL runs, seed 42
+python run_10k_stl.py --seeds 42 43 44
+python run_10k_stl.py --tasks mu eps_LUMO    # just these STL runs (11-head model, only one head trained)
+python run_10k_stl.py --resume
+```
+
+For a 2-task STL baseline that lives alongside the 2-task MTL runs, prefer
+the main runner: `python run_10k_experiments.py --tasks mu eps_LUMO --methods`
+(an empty `--methods` list runs STL only).
+
+#### 3. Single runs with `train.py`
+
+```bash
+# ── 11 tasks ──────────────────────────────────────────────────────────
 python train.py --method ls         --n_train 10000 --n_epochs 400   # linear scalarization
 python train.py --method pcgrad     --n_train 10000 --n_epochs 400   # PCGrad
-python train.py --method stl --stl_task_idx 0 --n_train 10000 --n_epochs 400   # STL: trains ONE task only (0..10, see data.TASK_NAMES)
+python train.py --method aim_scalar --n_train 10000 --n_epochs 400   # AIM, scalar policy
+python train.py --method aim_matrix --n_train 10000 --n_epochs 400   # AIM, matrix policy
+python train.py --method stl --stl_task_idx 0 --n_train 10000 --n_epochs 400   # STL on mu
+python train.py --method stl --stl_task_idx 3 --n_train 10000 --n_epochs 400   # STL on eps_LUMO
+for i in $(seq 0 10); do python train.py --method stl --stl_task_idx $i; done  # all 11 STL runs
 
-# Full matrix (4 MTL methods x 11 STL tasks), single seed (42) by default:
-python run_10k_experiments.py
-# Paper's full protocol (3 seeds, mean +/- std, significance vs STL):
-python run_10k_experiments.py --seeds 42 43 44
+# ── 2 tasks (mu + eps_LUMO): add --tasks; --stl_task_idx keeps its global index
+python train.py --method ls         --tasks mu eps_LUMO
+python train.py --method pcgrad     --tasks mu eps_LUMO
+python train.py --method aim_scalar --tasks mu eps_LUMO
+python train.py --method aim_matrix --tasks mu eps_LUMO
+python train.py --method stl --stl_task_idx 0 --tasks mu eps_LUMO   # STL on mu
+python train.py --method stl --stl_task_idx 3 --tasks mu eps_LUMO   # STL on eps_LUMO
+
+# Other subsets work the same way, e.g. the three energies:
+python train.py --method aim_matrix --tasks U0 U H
+```
+
+Note: `train.py` on its own does **not** add the `tasks_<names>/` sub-folder —
+pass `--save_dir ../result_updated/tasks_mu-eps_LUMO` yourself if you want a
+2-task single run to sit next to the runner's output.
+
+#### 4. Uni-Mol specifics
+
+Same commands from `Unimol/src/`, plus the fine-tuning ablations:
+
+```bash
+python run_10k_experiments.py                                   # 11 tasks, ls/pcgrad/aim_scalar/aim_matrix + STL
+python run_10k_experiments.py --tasks mu eps_LUMO               # 2 tasks
+python train.py --method aim_matrix --tasks mu eps_LUMO --trainable_layers 4   # partial fine-tune
+python train.py --method aim_matrix --freeze_backbone           # heads only
 ```
 
 **Key GNN arguments (paper-matched defaults):**
@@ -130,6 +211,8 @@ python run_10k_experiments.py --seeds 42 43 44
 | Argument | Default | Description |
 |---|---|---|
 | `--method` | `aim_matrix` | `ls` / `pcgrad` / `aim_scalar` / `aim_matrix` / `stl` |
+| `--tasks` | all 11 | Task names or indices to train on, e.g. `--tasks mu eps_LUMO` (model gets one head per selected task) |
+| `--stl_task_idx` | `0` | STL only: global QM9 task index 0..10 (must be among `--tasks` when a subset is used) |
 | `--n_train` | `10000` | AIM paper QM9 subset size (paper also reports 50k/100k) |
 | `--n_epochs` | `400` | Paper range: 300-400 |
 | `--patience` | `75` | Early-stopping patience on normalized val MAE (paper: 75) |
@@ -147,9 +230,9 @@ python run_10k_experiments.py --seeds 42 43 44
 
 Checkpoints (`best_model.pt`) and full per-epoch history (`history.json`) are saved to `<save_dir>/<run_name>/`. Model selection, LR scheduling, and early stopping all use **normalized** (unit-agnostic) validation MAE — with 11 tasks spanning Debye/eV/Bohr²/Bohr³/cal·mol⁻¹K⁻¹ units, averaging raw MAE would let whichever property has the largest numeric scale dominate; `history.json` still records raw physical-unit MAE per task (`val_per_task`/`test_per_task`) for reporting.
 
-> **STL caveat:** `--method stl` only trains the single head named by `--stl_task_idx` — the other ten heads in that run's `history.json` were never trained and their MAE columns are meaningless noise. To get all 11 properties' STL baselines, run it 11 times with `--stl_task_idx 0..10`, or just use `run_10k_experiments.py`, which does this automatically. Any of the other three methods (`ls`/`pcgrad`/`aim_scalar`/`aim_matrix`) train all 11 tasks together in a single run.
+> **STL caveat:** `--method stl` only trains the single head named by `--stl_task_idx` — the other heads in that run's `history.json` were never trained and their MAE columns are meaningless noise. To get every property's STL baseline, run it once per task (`--stl_task_idx 0..10`, or each selected task with `--tasks`), or just use `run_10k_experiments.py`, which does this automatically. The MTL methods (`ls`/`pcgrad`/`aim_scalar`/`aim_matrix`) train all selected tasks together in a single run.
 
-To launch the full method × seed matrix at 10k, use `run_10k_experiments.py` from either `GNN/src/` or `Unimol/src/` — the two scripts are identical apart from the default result directory (`GNN/result_updated/` vs `Unimol/results/`). For Uni-Mol the same `train.py` flags apply, plus `--freeze_backbone` / `--trainable_layers`.
+To launch the full method × seed matrix at 10k, use `run_10k_experiments.py` from either `GNN/src/` or `Unimol/src/` — the two scripts are identical apart from the default result directory (`GNN/result_updated/` vs `Unimol/results/`); both run `ls`, `pcgrad`, `aim_scalar`, `aim_matrix` and STL, on the 11-task set by default or on any `--tasks` subset. For Uni-Mol the same `train.py` flags apply, plus `--freeze_backbone` / `--trainable_layers`.
 
 ---
 
@@ -191,6 +274,14 @@ Unimol/results/<method>_n<N>_seed<S>/
 ```
 
 `<method>` is one of `ls`, `pcgrad`, `aim_scalar`, `aim_matrix`, or `stl_task<i>_<name>`. `<N>` is `--n_train`, `<S>` is `--seed`.
+
+Runs launched with `--tasks` (e.g. the 2-task mu + eps_LUMO problem) use the same layout one level down, so they never collide with 11-task runs:
+
+```
+GNN/result_updated/tasks_mu-eps_LUMO/<method>_n<N>_seed<S>/{best_model.pt, history.json}
+GNN/result_updated/tasks_mu-eps_LUMO/seed_results_n<N>.json
+Unimol/results/tasks_mu-eps_LUMO/...
+```
 
 ---
 

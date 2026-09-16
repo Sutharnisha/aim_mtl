@@ -18,6 +18,11 @@ Usage (from GNN/src/):
     python run_10k_experiments.py                            # 1 seed (42), defaults
     python run_10k_experiments.py --seeds 42 43 44            # full paper protocol
     python run_10k_experiments.py --n_epochs 5 --patience 5 --seeds 42   # smoke test
+    python run_10k_experiments.py --tasks mu eps_LUMO         # 2-task variant (all methods)
+
+With --tasks, every run (STL + MTL) is saved under
+    <save_dir>/tasks_<name1>-<name2>-.../
+so subset and full 11-task runs never collide.
 """
 
 import argparse
@@ -26,7 +31,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from train import train
-from data import TASK_NAMES, N_TASKS
+from data import TASK_NAMES, N_TASKS, parse_task_spec
 from metrics import aggregate_seeds, paired_significance, print_results_table, best_epoch_key
 
 MTL_METHODS = ["ls", "pcgrad", "aim_scalar", "aim_matrix"]
@@ -56,7 +61,8 @@ def run_stl(seed: int, save_dir: str, resume: bool = False, **kw) -> Dict[str, f
     With resume=True, a task whose run folder already holds a history.json
     is loaded instead of retrained."""
     per_task = {}
-    for i in range(N_TASKS):
+    task_cols = kw.get("task_indices") or list(range(N_TASKS))   # kw may carry task_indices
+    for i in task_cols:
         run_name = f"stl_task{i}_{TASK_NAMES[i]}_n{N_TRAIN}_seed{seed}"
         history = _load_history(save_dir, run_name) if resume else None
         if history is not None:
@@ -84,13 +90,17 @@ def run_mtl(method: str, seed: int, save_dir: str, resume: bool = False, **kw) -
 
 def main():
     p = argparse.ArgumentParser(description="AIM paper 10k QM9 method x seed matrix")
-    p.add_argument("--save_dir",  default="../result_updated")
+    p.add_argument("--save_dir",  default="../result_2task")
     p.add_argument("--n_epochs",  type=int, default=400)
     p.add_argument("--patience",  type=int, default=75)
     p.add_argument("--seeds",     type=int, nargs="+", default=[42])
-    p.add_argument("--methods",   nargs="+", default=MTL_METHODS,
+    p.add_argument("--methods",   nargs="*", default=MTL_METHODS,
                     help="MTL methods to run in addition to per-task STL")
     p.add_argument("--data_root", default="../../data/qm9")
+    p.add_argument("--tasks",     nargs="+", default=None,
+                    help="Task names/indices to use (default: all 11). E.g. "
+                         "--tasks mu eps_LUMO runs the 2-task problem for every "
+                         "method; results go to <save_dir>/tasks_mu-eps_LUMO/")
     p.add_argument("--skip_stl",  action="store_true",
                     help="Run only the MTL methods, no STL baseline at all: the "
                          "table then reports per-task MAE and Mean Rank only "
@@ -100,8 +110,15 @@ def main():
                          "has a history.json and load its results instead")
     args = p.parse_args()
 
+    task_cols  = parse_task_spec(args.tasks)
+    task_names = [TASK_NAMES[i] for i in task_cols]
+    save_dir   = args.save_dir
+    if len(task_cols) != N_TASKS:
+        save_dir = str(Path(args.save_dir) / ("tasks_" + "-".join(task_names)))
+    print(f"Tasks ({len(task_cols)}): {task_names}  |  save_dir: {save_dir}")
+
     train_kw = dict(n_epochs=args.n_epochs, patience=args.patience,
-                     data_root=args.data_root)
+                     data_root=args.data_root, task_indices=task_cols)
 
     seed_results: Dict[str, Dict[str, Dict[str, float]]] = {}
     for seed in args.seeds:
@@ -109,16 +126,20 @@ def main():
         seed_results[sid] = {}
         if not args.skip_stl:
             seed_results[sid]["stl"] = run_stl(
-                seed, args.save_dir, resume=args.resume, **train_kw)
+                seed, save_dir, resume=args.resume, **train_kw)
         for method in args.methods:
             seed_results[sid][method] = run_mtl(
-                method, seed, args.save_dir, resume=args.resume, **train_kw)
+                method, seed, save_dir, resume=args.resume, **train_kw)
 
-    out_path = Path(args.save_dir) / f"seed_results_n{N_TRAIN}.json"
+    out_path = Path(save_dir) / f"seed_results_n{N_TRAIN}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w") as f:
         json.dump(seed_results, f, indent=2)
     print(f"\nRaw per-seed results saved: {out_path}")
+
+    if not any(seed_results[s] for s in seed_results):
+        print("Nothing was run (--skip_stl with an empty --methods list); no table.")
+        return
 
     # ── Aggregate + report (paper-style table) ────────────────────────────
     agg = aggregate_seeds(seed_results)
@@ -128,11 +149,11 @@ def main():
     print(f"\n{'='*80}\nMean test MAE across {len(args.seeds)} seeds "
           f"(n_train={N_TRAIN})\n{'='*80}")
     print_results_table(mean_results, stl_baseline=mean_results.get("stl"),
-                        task_names=TASK_NAMES)
+                        task_names=task_names)
 
     print("\nStd across seeds:")
     for method in mean_results:
-        std_str = "  ".join(f"{t}={std_results[method][t]:.4f}" for t in TASK_NAMES)
+        std_str = "  ".join(f"{t}={std_results[method][t]:.4f}" for t in task_names)
         print(f"  {method:12s}: {std_str}")
 
     if args.skip_stl:
