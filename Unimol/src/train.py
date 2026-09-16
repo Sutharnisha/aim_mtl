@@ -547,7 +547,7 @@ if __name__ == "__main__":
 
     p = argparse.ArgumentParser(description="Train AIM or baseline with Uni-Mol on QM9")
 
-    p.add_argument("--method",           default="pcgrad",
+    p.add_argument("--method",           default="aim_scalar",
                    choices=["ls", "pcgrad", "aim_scalar", "aim_matrix", "stl"])
     p.add_argument("--stl_task_idx",     type=int,   default=0,
                    help=f"Task index for STL, 0..{10} -> {TASK_NAMES}")

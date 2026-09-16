@@ -23,7 +23,7 @@ Usage (from GNN/src/):
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from train import train
 from data import TASK_NAMES, N_TASKS
@@ -31,6 +31,15 @@ from metrics import aggregate_seeds, paired_significance, print_results_table, b
 
 MTL_METHODS = ["ls", "pcgrad", "aim_scalar", "aim_matrix"]
 N_TRAIN = 10_000
+
+
+def _load_history(save_dir: str, run_name: str) -> Optional[List[dict]]:
+    """history.json of a finished run under save_dir, or None if absent."""
+    path = Path(save_dir) / run_name / "history.json"
+    if not path.exists():
+        return None
+    with open(path) as f:
+        return json.load(f)
 
 
 def _best_test_per_task(history: List[dict]) -> Dict[str, float]:
@@ -41,23 +50,35 @@ def _best_test_per_task(history: List[dict]) -> Dict[str, float]:
     return best["test_per_task"]
 
 
-def run_stl(seed: int, save_dir: str, **kw) -> Dict[str, float]:
+def run_stl(seed: int, save_dir: str, resume: bool = False, **kw) -> Dict[str, float]:
     """One STL run per task; task i's MAE comes only from the run that
-    actually trained on task i (see plot_stl_result.py's note on this)."""
+    actually trained on task i (see plot_stl_result.py's note on this).
+    With resume=True, a task whose run folder already holds a history.json
+    is loaded instead of retrained."""
     per_task = {}
     for i in range(N_TASKS):
-        print(f"\n--- seed {seed} | stl task {i} ({TASK_NAMES[i]}) ---")
-        history = train(
-            method="stl", stl_task_idx=i, n_train=N_TRAIN,
-            seed=seed, save_dir=save_dir, **kw,
-        )
+        run_name = f"stl_task{i}_{TASK_NAMES[i]}_n{N_TRAIN}_seed{seed}"
+        history = _load_history(save_dir, run_name) if resume else None
+        if history is not None:
+            print(f"\n--- seed {seed} | stl task {i} ({TASK_NAMES[i]}) — loaded from {run_name} ---")
+        else:
+            print(f"\n--- seed {seed} | stl task {i} ({TASK_NAMES[i]}) ---")
+            history = train(
+                method="stl", stl_task_idx=i, n_train=N_TRAIN,
+                seed=seed, save_dir=save_dir, **kw,
+            )
         per_task[TASK_NAMES[i]] = _best_test_per_task(history)[TASK_NAMES[i]]
     return per_task
 
 
-def run_mtl(method: str, seed: int, save_dir: str, **kw) -> Dict[str, float]:
-    print(f"\n--- seed {seed} | {method} ---")
-    history = train(method=method, n_train=N_TRAIN, seed=seed, save_dir=save_dir, **kw)
+def run_mtl(method: str, seed: int, save_dir: str, resume: bool = False, **kw) -> Dict[str, float]:
+    run_name = f"{method}_n{N_TRAIN}_seed{seed}"
+    history = _load_history(save_dir, run_name) if resume else None
+    if history is not None:
+        print(f"\n--- seed {seed} | {method} — loaded from {run_name} ---")
+    else:
+        print(f"\n--- seed {seed} | {method} ---")
+        history = train(method=method, n_train=N_TRAIN, seed=seed, save_dir=save_dir, **kw)
     return _best_test_per_task(history)
 
 
@@ -70,6 +91,13 @@ def main():
     p.add_argument("--methods",   nargs="+", default=MTL_METHODS,
                     help="MTL methods to run in addition to per-task STL")
     p.add_argument("--data_root", default="../../data/qm9")
+    p.add_argument("--skip_stl",  action="store_true",
+                    help="Run only the MTL methods, no STL baseline at all: the "
+                         "table then reports per-task MAE and Mean Rank only "
+                         "(no Delta_m%% vs STL, no significance test)")
+    p.add_argument("--resume",    action="store_true",
+                    help="Skip any run (STL or MTL) whose save_dir folder already "
+                         "has a history.json and load its results instead")
     args = p.parse_args()
 
     train_kw = dict(n_epochs=args.n_epochs, patience=args.patience,
@@ -78,9 +106,13 @@ def main():
     seed_results: Dict[str, Dict[str, Dict[str, float]]] = {}
     for seed in args.seeds:
         sid = str(seed)
-        seed_results[sid] = {"stl": run_stl(seed, args.save_dir, **train_kw)}
+        seed_results[sid] = {}
+        if not args.skip_stl:
+            seed_results[sid]["stl"] = run_stl(
+                seed, args.save_dir, resume=args.resume, **train_kw)
         for method in args.methods:
-            seed_results[sid][method] = run_mtl(method, seed, args.save_dir, **train_kw)
+            seed_results[sid][method] = run_mtl(
+                method, seed, args.save_dir, resume=args.resume, **train_kw)
 
     out_path = Path(args.save_dir) / f"seed_results_n{N_TRAIN}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -95,14 +127,17 @@ def main():
 
     print(f"\n{'='*80}\nMean test MAE across {len(args.seeds)} seeds "
           f"(n_train={N_TRAIN})\n{'='*80}")
-    print_results_table(mean_results, stl_baseline=mean_results["stl"], task_names=TASK_NAMES)
+    print_results_table(mean_results, stl_baseline=mean_results.get("stl"),
+                        task_names=TASK_NAMES)
 
     print("\nStd across seeds:")
     for method in mean_results:
         std_str = "  ".join(f"{t}={std_results[method][t]:.4f}" for t in TASK_NAMES)
         print(f"  {method:12s}: {std_str}")
 
-    if len(args.seeds) >= 2:
+    if args.skip_stl:
+        print("\n(--skip_stl: no STL baseline, so no Delta_m% or significance test.)")
+    elif len(args.seeds) >= 2:
         print("\nSignificance vs STL (paired t-test across seeds, alpha=0.05):")
         for method in args.methods:
             sig = paired_significance(seed_results, method, "stl")
