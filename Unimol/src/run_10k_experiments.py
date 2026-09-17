@@ -90,7 +90,7 @@ def run_mtl(method: str, seed: int, save_dir: str, resume: bool = False, **kw) -
 
 def main():
     p = argparse.ArgumentParser(description="AIM paper 10k QM9 method x seed matrix")
-    p.add_argument("--save_dir",  default="../results")
+    p.add_argument("--save_dir",  default="../results_2task")
     p.add_argument("--n_epochs",  type=int, default=400)
     p.add_argument("--patience",  type=int, default=75)
     p.add_argument("--seeds",     type=int, nargs="+", default=[42])
