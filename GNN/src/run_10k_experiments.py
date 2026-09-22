@@ -90,7 +90,10 @@ def run_mtl(method: str, seed: int, save_dir: str, resume: bool = False, **kw) -
 
 def main():
     p = argparse.ArgumentParser(description="AIM paper 10k QM9 method x seed matrix")
-    p.add_argument("--save_dir",  default="../result_2task")
+    # The script's own default task set is all 11, so the default tree must be
+    # the 11-task one. A 2-task run adds its own tasks_<names>/ subfolder below
+    # whatever --save_dir is given.
+    p.add_argument("--save_dir",  default="../result_11task")
     p.add_argument("--n_epochs",  type=int, default=400)
     p.add_argument("--patience",  type=int, default=75)
     p.add_argument("--seeds",     type=int, nargs="+", default=[42])
@@ -105,6 +108,12 @@ def main():
                     help="Run only the MTL methods, no STL baseline at all: the "
                          "table then reports per-task MAE and Mean Rank only "
                          "(no Delta_m%% vs STL, no significance test)")
+    p.add_argument("--log_cosine", action="store_true",
+                    help="record per-epoch cos(g_i, g_j) into history.json for "
+                         "the methods that compute per-task gradients "
+                         "(pcgrad, aim_scalar, aim_matrix)")
+    p.add_argument("--keep_every", type=int, default=0,
+                    help="also snapshot weights every N epochs (0 = off)")
     p.add_argument("--resume",    action="store_true",
                     help="Skip any run (STL or MTL) whose save_dir folder already "
                          "has a history.json and load its results instead")
@@ -118,7 +127,8 @@ def main():
     print(f"Tasks ({len(task_cols)}): {task_names}  |  save_dir: {save_dir}")
 
     train_kw = dict(n_epochs=args.n_epochs, patience=args.patience,
-                     data_root=args.data_root, task_indices=task_cols)
+                     data_root=args.data_root, task_indices=task_cols,
+                     log_cosine=args.log_cosine, keep_every=args.keep_every)
 
     seed_results: Dict[str, Dict[str, Dict[str, float]]] = {}
     for seed in args.seeds:

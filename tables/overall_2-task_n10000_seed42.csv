@@ -1,0 +1,6 @@
+Method,GNN dm%,GNN MR,GNN MR+STL,Uni-Mol dm%,Uni-Mol MR,Uni-Mol MR+STL
+STL,ref,--,1.00,ref,--,2.00
+LS,-27.1,3.00,4.00,-7.2,3.50,4.50
+PCGrad,-29.8,4.00,5.00,-1.2,1.00*,1.50
+AIM-Scalar,-12.3,1.00*,2.00,-3.6,3.00,3.50
+AIM-Matrix,-17.7,2.00,3.00,-3.4,2.50,3.50

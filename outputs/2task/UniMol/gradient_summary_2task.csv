@@ -1,0 +1,3 @@
+checkpoint,conflict_rate,mean_cosine,sd_cosine,w_0_from_1,w_1_from_0
+ls,0.438,+0.0163,0.3225,,
+aim_matrix,0.500,-0.0195,0.2807,0.378,0.502

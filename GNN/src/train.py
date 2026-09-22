@@ -190,6 +190,18 @@ def _step_ls(
 # PCGrad step
 # ---------------------------------------------------------------------------
 
+def _cosine_matrix(flat_grads) -> list:
+    """Pairwise cos(g_i, g_j) for one step, as a plain nested list.
+
+    train.py historically discarded these -- they are the only record of the
+    conflict the optimizer actually saw, and every conflict figure needs them.
+    Enabled by --log_cosine; costs one [N, d] normalize plus an N x N matmul.
+    """
+    G = torch.stack([g.detach().float() for g in flat_grads])
+    Gn = F.normalize(G, dim=1, eps=1e-12)
+    return (Gn @ Gn.t()).cpu().tolist()
+
+
 def _step_pcgrad(
     model:     MPNNMultiTask,
     optimizer: torch.optim.Optimizer,
@@ -197,6 +209,7 @@ def _step_pcgrad(
     means:     torch.Tensor,
     stds:      torch.Tensor,
     device:    torch.device,
+    log_cosine: bool = False,
 ) -> dict:
     flat_grads, task_loss_vals = _per_task_grads(
         model, batch, means, stds, device
@@ -205,7 +218,10 @@ def _step_pcgrad(
     _fill_head_grads_and_override_encoder(
         model, batch, means, stds, device, g_combined, optimizer
     )
-    return {"task_losses": task_loss_vals}
+    info = {"task_losses": task_loss_vals}
+    if log_cosine:
+        info["cos"] = _cosine_matrix(flat_grads)
+    return info
 
 
 # ---------------------------------------------------------------------------
@@ -223,9 +239,11 @@ def _step_aim(
     means:            torch.Tensor,
     stds:             torch.Tensor,
     device:           torch.device,
+    log_cosine:       bool = False,
 ) -> dict:
     # ── 1-2: Per-task encoder gradients on primary batch ─────────────────
     flat_grads, task_loss_vals = _per_task_grads(model, primary_batch, means, stds, device)
+    cos_step = _cosine_matrix(flat_grads) if log_cosine else None
 
     # ── 3: AIM intervention ───────────────────────────────────────────────
     g_intervened, _ = policy(flat_grads)
@@ -253,7 +271,10 @@ def _step_aim(
     L_policy.backward()
     optimizer_policy.step()
 
-    return {"task_losses": task_loss_vals, **policy_info}
+    info = {"task_losses": task_loss_vals, **policy_info}
+    if cos_step is not None:
+        info["cos"] = cos_step
+    return info
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +352,8 @@ def train(
     data_root:        str   = "../../data/qm9",
     save_dir:         str   = "../result_updated",
     log_every:        int   = 1,
+    log_cosine:       bool  = False,   # record per-epoch cos(g_i, g_j)
+    keep_every:       int   = 0,       # also snapshot weights every N epochs
     device_str:       Optional[str] = None,
 ) -> List[dict]:
 
@@ -454,6 +477,7 @@ def train(
                 step_info = _step_pcgrad(
                     model, optimizer_model,
                     primary_batch, means, stds, device,
+                    log_cosine=log_cosine,
                 )
             else:
                 guide_batch = next(guide_cyc)
@@ -462,6 +486,7 @@ def train(
                     optimizer_model, optimizer_policy,
                     primary_batch, guide_batch,
                     means, stds, device,
+                    log_cosine=log_cosine,
                 )
             epoch_steps.append(step_info)
 
@@ -497,6 +522,11 @@ def train(
             "train_task_loss":   avg_task_losses,
         }
 
+        if log_cosine and "cos" in epoch_steps[0]:
+            C = np.array([s["cos"] for s in epoch_steps])      # [steps, N, N]
+            log["cos_mean"] = C.mean(axis=0).tolist()
+            log["cos_conflict_freq"] = (C < 0).mean(axis=0).tolist()
+
         if policy is not None:
             tau_np = policy.tau.detach().cpu().numpy()
             log["tau"] = tau_np.tolist()
@@ -522,6 +552,14 @@ def train(
             torch.save(ckpt, save_path / "best_model.pt")
         else:
             epochs_no_improve += 1
+
+        # Periodic snapshots: best_model.pt is overwritten every improvement,
+        # so it cannot answer "what did the model look like at epoch 10".
+        if keep_every and epoch % keep_every == 0:
+            snap = {"model": model.state_dict(), "epoch": epoch}
+            if policy is not None:
+                snap["policy"] = policy.state_dict()
+            torch.save(snap, save_path / f"epoch_{epoch:04d}.pt")
 
         # ── Logging ───────────────────────────────────────────────────────
         if epoch % log_every == 0 or epoch == 1:
@@ -592,6 +630,14 @@ if __name__ == "__main__":
     p.add_argument("--data_root",        default="../../data/qm9")
     p.add_argument("--save_dir",         default="../result_updated")
     p.add_argument("--log_every",        type=int,   default=1)
+    p.add_argument("--log_cosine",       action="store_true",
+                   help="record per-epoch mean cos(g_i, g_j) and conflict "
+                        "frequency into history.json (pcgrad / aim_* only, "
+                        "where per-task gradients already exist)")
+    p.add_argument("--keep_every",       type=int,   default=0,
+                   help="also snapshot weights every N epochs as epoch_NNNN.pt "
+                        "(0 = off); best_model.pt alone cannot show how the "
+                        "model looked mid-training")
     p.add_argument("--device",           default=None, dest="device_str")
     args = p.parse_args()
 
